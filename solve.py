@@ -1,19 +1,17 @@
-# solve.py
+
 import asyncio, os, urllib.request, urllib.parse
 from playwright.async_api import async_playwright
 
-SITE = "https://freeiptv2023-d.ottc.xyz/index.php"
+LANDING = "https://freeiptv2023-d.ottc.xyz"
+SITE    = "https://freeiptv2023-d.ottc.xyz/index.php"
 VALTOWN = "https://nmsilva--09b5306a43a711f1a98b42b51c65c3df.web.val.run"
 
 async def main():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-blink-features=AutomationControlled",
-            ],
+            args=["--no-sandbox", "--disable-setuid-sandbox",
+                  "--disable-blink-features=AutomationControlled"],
         )
         ctx = await browser.new_context(
             user_agent=(
@@ -24,73 +22,59 @@ async def main():
             viewport={"width": 1280, "height": 800},
         )
         page = await ctx.new_page()
-
-        # aumenta timeout global
         page.set_default_timeout(60000)
 
-        print("A carregar a página...")
-        # usa domcontentloaded em vez de networkidle
-        await page.goto(SITE, wait_until="domcontentloaded", timeout=60000)
+        # --- passo 1: landing page com countdown ---
+        print("A carregar landing page...")
+        await page.goto(LANDING, wait_until="domcontentloaded", timeout=60000)
 
-        print("Página carregada, à espera do Turnstile (máx 45s)...")
-        # aguarda o input ter valor
+        print("À espera 6s pelo countdown...")
+        await page.wait_for_timeout(6000)
+
+        # clica no botão "Create free IPTV account!"
+        print("A clicar no botão...")
+        btn = page.locator("text=Create free IPTV account")
+        await btn.wait_for(state="visible", timeout=10000)
+        await btn.click()
+
+        # --- passo 2: index.php com Turnstile ---
+        print("À espera de index.php carregar...")
+        await page.wait_for_url("**/index.php", timeout=15000)
+        await page.wait_for_timeout(3000)  # deixa o Turnstile inicializar
+
+        print("À espera do Turnstile resolver (máx 45s)...")
         try:
             await page.wait_for_function(
                 """() => {
-                    const inputs = document.querySelectorAll('input');
-                    for (const el of inputs) {
-                        if (el.name === 'cf-turnstile-response' && el.value.length > 10)
-                            return true;
-                    }
-                    // também tenta pelo iframe
-                    return false;
+                    const el = document.querySelector('[name="cf-turnstile-response"]');
+                    return el && el.value && el.value.length > 10;
                 }""",
                 timeout=45000,
                 polling=1000,
             )
-            print("Turnstile resolvido via DOM!")
         except Exception:
-            print("Input não encontrado, a verificar frames...")
-
-            # dump de debug
-            for f in page.frames:
-                print("  frame:", f.url[:80])
-
+            await page.screenshot(path="debug.png")
             inputs = await page.eval_on_selector_all(
                 "input",
                 "els => els.map(e => ({name: e.name, value: e.value.slice(0,30)}))"
             )
-            print("  inputs na página:", inputs)
-
-            await page.screenshot(path="debug.png")
+            print("Inputs:", inputs)
+            print("Frames:", [f.url for f in page.frames])
             raise Exception("Turnstile não resolveu — ver debug.png")
 
-        # lê o token
-        token = await page.evaluate("""() => {
-            const el = document.querySelector('[name="cf-turnstile-response"]');
-            return el ? el.value : null;
-        }""")
-
-        if not token:
-            await page.screenshot(path="debug.png")
-            raise Exception("Token vazio após wait")
-
+        token = await page.evaluate(
+            "() => document.querySelector('[name=\"cf-turnstile-response\"]').value"
+        )
         print(f"Token: {token[:30]}...")
 
-        # lê o cookie
         cookies = await ctx.cookies()
         session = next(
-            (c["value"] for c in cookies if c["name"] == "ottc_sess"),
-            None,
+            (c["value"] for c in cookies if c["name"] == "ottc_sess"), None
         )
-
         if not session:
-            print("Cookies disponíveis:", [c["name"] for c in cookies])
-            raise Exception("Cookie ottc_sess não encontrado")
-
+            raise Exception(f"Cookie não encontrado. Cookies: {[c['name'] for c in cookies]}")
         print(f"Session: {session[:12]}...")
 
-        # chama o Val Town
         url = (
             f"{VALTOWN}/activate"
             f"?token={urllib.parse.quote(token)}"
@@ -98,8 +82,7 @@ async def main():
         )
         print("A chamar Val Town...")
         resp = urllib.request.urlopen(url, timeout=30)
-        body = resp.read().decode()
-        print(f"Val Town response: {body}")
+        print(f"Resposta: {resp.read().decode()}")
 
         await browser.close()
 
