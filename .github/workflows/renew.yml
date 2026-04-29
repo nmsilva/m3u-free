@@ -33,3 +33,4 @@ jobs:
         with:
           name: debug-screenshot
           path: debug.png
+          retention-days: 1

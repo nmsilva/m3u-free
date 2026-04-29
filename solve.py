@@ -1,5 +1,5 @@
 # solve.py
-import asyncio, os, re
+import asyncio, os, urllib.request, urllib.parse
 from playwright.async_api import async_playwright
 
 SITE = "https://freeiptv2023-d.ottc.xyz/index.php"
@@ -9,70 +9,83 @@ async def main():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox"],
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled",
+            ],
         )
-        ctx  = await browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/120.0.0.0 Safari/537.36"
+        ctx = await browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            viewport={"width": 1280, "height": 800},
         )
         page = await ctx.new_page()
 
-        print("A carregar a página...")
-        await page.goto(SITE, wait_until="networkidle")
+        # aumenta timeout global
+        page.set_default_timeout(60000)
 
-        # espera até o input do turnstile ter valor (máx 30s)
-        print("À espera do Turnstile resolver...")
+        print("A carregar a página...")
+        # usa domcontentloaded em vez de networkidle
+        await page.goto(SITE, wait_until="domcontentloaded", timeout=60000)
+
+        print("Página carregada, à espera do Turnstile (máx 45s)...")
+        # aguarda o input ter valor
         try:
             await page.wait_for_function(
                 """() => {
-                    const el = document.querySelector('[name="cf-turnstile-response"]');
-                    return el && el.value && el.value.length > 10;
+                    const inputs = document.querySelectorAll('input');
+                    for (const el of inputs) {
+                        if (el.name === 'cf-turnstile-response' && el.value.length > 10)
+                            return true;
+                    }
+                    // também tenta pelo iframe
+                    return false;
                 }""",
-                timeout=30000,
+                timeout=45000,
+                polling=1000,
             )
+            print("Turnstile resolvido via DOM!")
         except Exception:
-            # tenta clicar se for o modo managed (checkbox)
-            print("A tentar clicar no Turnstile...")
-            try:
-                frame = next(
-                    f for f in page.frames
-                    if "challenges.cloudflare.com" in f.url
-                )
-                await frame.locator("input[type=checkbox]").click(timeout=5000)
-                await page.wait_for_function(
-                    """() => {
-                        const el = document.querySelector('[name="cf-turnstile-response"]');
-                        return el && el.value && el.value.length > 10;
-                    }""",
-                    timeout=20000,
-                )
-            except Exception as e:
-                print(f"Turnstile não resolveu: {e}")
-                # screenshot para debug
-                await page.screenshot(path="debug.png")
-                raise
+            print("Input não encontrado, a verificar frames...")
 
-        # lê token do DOM
-        token = await page.eval_on_selector(
-            '[name="cf-turnstile-response"]',
-            "el => el.value"
-        )
-        print(f"Token obtido: {token[:30]}...")
+            # dump de debug
+            for f in page.frames:
+                print("  frame:", f.url[:80])
 
-        # lê cookie de sessão
+            inputs = await page.eval_on_selector_all(
+                "input",
+                "els => els.map(e => ({name: e.name, value: e.value.slice(0,30)}))"
+            )
+            print("  inputs na página:", inputs)
+
+            await page.screenshot(path="debug.png")
+            raise Exception("Turnstile não resolveu — ver debug.png")
+
+        # lê o token
+        token = await page.evaluate("""() => {
+            const el = document.querySelector('[name="cf-turnstile-response"]');
+            return el ? el.value : null;
+        }""")
+
+        if not token:
+            await page.screenshot(path="debug.png")
+            raise Exception("Token vazio após wait")
+
+        print(f"Token: {token[:30]}...")
+
+        # lê o cookie
         cookies = await ctx.cookies()
         session = next(
             (c["value"] for c in cookies if c["name"] == "ottc_sess"),
-            None
+            None,
         )
 
         if not session:
-            # tenta extrair do header da página
-            session = await page.evaluate(
-                "() => document.cookie"
-            )
-            print(f"Cookies raw: {session}")
+            print("Cookies disponíveis:", [c["name"] for c in cookies])
             raise Exception("Cookie ottc_sess não encontrado")
 
         print(f"Session: {session[:12]}...")
@@ -83,10 +96,10 @@ async def main():
             f"?token={urllib.parse.quote(token)}"
             f"&session={urllib.parse.quote(session)}"
         )
-        print(f"A chamar Val Town...")
+        print("A chamar Val Town...")
         resp = urllib.request.urlopen(url, timeout=30)
         body = resp.read().decode()
-        print(f"Resposta Val Town: {body}")
+        print(f"Val Town response: {body}")
 
         await browser.close()
 
