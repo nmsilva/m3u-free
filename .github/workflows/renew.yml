@@ -1,0 +1,28 @@
+# .github/workflows/renew.yml
+name: Renew IPTV
+on:
+  schedule:
+    - cron: "0 6 * * *" # todos os dias às 06:00 UTC
+  workflow_dispatch: # permite correr manualmente
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install playwright
+          playwright install chromium
+          playwright install-deps
+
+      - name: Solve Turnstile & Activate
+        env:
+          VALTOWN_URL: ${{ secrets.VALTOWN_URL }}
+        run: python solve.py
