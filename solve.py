@@ -7,45 +7,87 @@ VALTOWN = "https://nmsilva--09b5306a43a711f1a98b42b51c65c3df.web.val.run"
 
 async def main():
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        ctx = await browser.new_context()
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"],
+        )
+        ctx  = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0.0.0 Safari/537.36"
+        )
         page = await ctx.new_page()
 
-        token = None
-        session = None
+        print("A carregar a página...")
+        await page.goto(SITE, wait_until="networkidle")
 
-        # captura o cookie de sessão
-        async def handle_response(response):
-            nonlocal session
-            if "ottc.xyz" in response.url:
-                cookies = await ctx.cookies()
-                for c in cookies:
-                    if c["name"] == "ottc_sess":
-                        session = c["value"]
+        # espera até o input do turnstile ter valor (máx 30s)
+        print("À espera do Turnstile resolver...")
+        try:
+            await page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('[name="cf-turnstile-response"]');
+                    return el && el.value && el.value.length > 10;
+                }""",
+                timeout=30000,
+            )
+        except Exception:
+            # tenta clicar se for o modo managed (checkbox)
+            print("A tentar clicar no Turnstile...")
+            try:
+                frame = next(
+                    f for f in page.frames
+                    if "challenges.cloudflare.com" in f.url
+                )
+                await frame.locator("input[type=checkbox]").click(timeout=5000)
+                await page.wait_for_function(
+                    """() => {
+                        const el = document.querySelector('[name="cf-turnstile-response"]');
+                        return el && el.value && el.value.length > 10;
+                    }""",
+                    timeout=20000,
+                )
+            except Exception as e:
+                print(f"Turnstile não resolveu: {e}")
+                # screenshot para debug
+                await page.screenshot(path="debug.png")
+                raise
 
-        # interceta o token do turnstile no POST
-        async def handle_request(request):
-            nonlocal token
-            if "index.php" in request.url and request.method == "POST":
-                body = request.post_data or ""
-                m = re.search(r"cf-turnstile-response=([^&]+)", body)
-                if m:
-                    token = m.group(1)
+        # lê token do DOM
+        token = await page.eval_on_selector(
+            '[name="cf-turnstile-response"]',
+            "el => el.value"
+        )
+        print(f"Token obtido: {token[:30]}...")
 
-        page.on("response", handle_response)
-        page.on("request", handle_request)
+        # lê cookie de sessão
+        cookies = await ctx.cookies()
+        session = next(
+            (c["value"] for c in cookies if c["name"] == "ottc_sess"),
+            None
+        )
 
-        await page.goto(SITE)
-        # espera até o turnstile ser resolvido automaticamente
-        await page.wait_for_timeout(8000)
+        if not session:
+            # tenta extrair do header da página
+            session = await page.evaluate(
+                "() => document.cookie"
+            )
+            print(f"Cookies raw: {session}")
+            raise Exception("Cookie ottc_sess não encontrado")
 
-        if token and session:
-            import urllib.request, urllib.parse
-            url = f"{VALTOWN}/activate?token={urllib.parse.quote(token)}&session={session}"
-            req = urllib.request.urlopen(url)
-            print("Resposta:", req.read().decode())
-        else:
-            print("ERRO: token ou session não encontrados")
-            raise Exception("Falhou")
+        print(f"Session: {session[:12]}...")
+
+        # chama o Val Town
+        url = (
+            f"{VALTOWN}/activate"
+            f"?token={urllib.parse.quote(token)}"
+            f"&session={urllib.parse.quote(session)}"
+        )
+        print(f"A chamar Val Town...")
+        resp = urllib.request.urlopen(url, timeout=30)
+        body = resp.read().decode()
+        print(f"Resposta Val Town: {body}")
+
+        await browser.close()
 
 asyncio.run(main())
