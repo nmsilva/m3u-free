@@ -26,3 +26,10 @@ jobs:
         env:
           VALTOWN_URL: ${{ secrets.VALTOWN_URL }}
         run: python solve.py
+
+      - name: Upload debug screenshot
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshot
+          path: debug.png
